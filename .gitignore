@@ -1,0 +1,6 @@
+.env
+.env.local
+.phpunit.cache/
+vendor/
+*.log
+*.pid

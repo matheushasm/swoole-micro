@@ -1,0 +1,507 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+$root = dirname(__DIR__);
+$envFile = $root . '/.env';
+loadEnvFile($envFile);
+$autoload = $root . '/vendor/autoload.php';
+if (!file_exists($autoload)) {
+    fwrite(STDERR, "Autoload file not found. Run composer install.\n");
+    exit(1);
+}
+
+require $autoload;
+
+use SwooleMicro\Core\Worker;
+use SwooleMicro\Core\WorkerOptions;
+use SwooleMicro\Queue\QueueDriverInterface;
+use SwooleMicro\Queue\RedisQueueDriver;
+use SwooleMicro\Support\Json;
+use SwooleMicro\Supervisor\SupervisorInterface;
+
+$configFile = $root . '/config/workers.php';
+if (!file_exists($configFile)) {
+    fwrite(STDERR, "Config not found at {$configFile}.\n");
+    exit(1);
+}
+
+$config = require $configFile;
+
+$args = $argv;
+array_shift($args);
+$command = $args[0] ?? null;
+
+if ($command === null) {
+    $command = 'interactive';
+}
+
+dispatchCommand($command, $args, $config);
+
+function buildQueueDriver(array $config): QueueDriverInterface
+{
+    $driverClass = $config['driver'] ?? null;
+    if (!is_string($driverClass) || !class_exists($driverClass)) {
+        throw new RuntimeException('Queue driver class not configured.');
+    }
+
+    $redisConfig = $config['redis'] ?? [];
+    if (is_a($driverClass, SwooleMicro\Queue\RedisQueueDriver::class, true)
+        && isset($redisConfig['host'], $redisConfig['port'])) {
+        return new $driverClass(
+            (string) $redisConfig['host'],
+            (int) $redisConfig['port'],
+            (int) ($redisConfig['db'] ?? 0),
+            (string) ($redisConfig['prefix'] ?? 'swoole-micro:'),
+            (string) ($redisConfig['username'] ?? 'default'),
+            (string) ($redisConfig['password'] ?? '')
+        );
+    }
+
+    return new $driverClass();
+}
+
+function loadEnvFile(string $path): void
+{
+    if (!is_file($path)) {
+        return;
+    }
+
+    $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($lines === false) {
+        return;
+    }
+
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '#')) {
+            continue;
+        }
+
+        $parts = explode('=', $line, 2);
+        if (count($parts) !== 2) {
+            continue;
+        }
+
+        $key = trim($parts[0]);
+        $value = trim($parts[1]);
+
+        if ($key === '' || getenv($key) !== false) {
+            continue;
+        }
+
+        if ((str_starts_with($value, '\"') && str_ends_with($value, '\"')) ||
+            (str_starts_with($value, '\'') && str_ends_with($value, '\''))) {
+            $value = substr($value, 1, -1);
+        }
+
+        putenv($key . '=' . $value);
+        $_ENV[$key] = $value;
+        $_SERVER[$key] = $value;
+    }
+}
+
+function dispatchCommand(string $command, array $args, array $config): void
+{
+    switch ($command) {
+        case 'interactive':
+            interactiveLoop($config);
+            return;
+        case 'help':
+            renderHelp();
+            return;
+        case 'workers:list':
+            listWorkers($config);
+            return;
+        case 'worker:run':
+            runWorker($args, $config);
+            return;
+        case 'worker:spawn':
+            spawnWorkers($args);
+            return;
+        case 'queue:push':
+            pushQueue($args, $config);
+            return;
+        case 'supervisor:watch':
+            watchSupervisor($config);
+            return;
+        default:
+            fwrite(STDERR, "Unknown command: {$command}\n");
+            renderHelp();
+            exit(1);
+    }
+}
+
+function interactiveLoop(array $config): void
+{
+    $actions = [
+        ['label' => 'workers:list', 'command' => 'workers:list'],
+        ['label' => 'worker:run', 'command' => 'worker:run'],
+        ['label' => 'worker:spawn', 'command' => 'worker:spawn'],
+        ['label' => 'queue:push', 'command' => 'queue:push'],
+        ['label' => 'supervisor:watch', 'command' => 'supervisor:watch'],
+        ['label' => 'help', 'command' => 'help'],
+        ['label' => 'exit', 'command' => 'exit'],
+    ];
+
+    $selection = selectMenuOption($actions);
+
+    switch ($selection) {
+        case 'workers:list':
+            listWorkers($config);
+            return;
+        case 'worker:run':
+            $workerName = prompt('Worker name');
+            dispatchCommand('worker:run', ['worker:run', $workerName], $config);
+            return;
+        case 'worker:spawn':
+            $workerName = prompt('Worker name');
+            $count = prompt('Count', '2');
+            dispatchCommand('worker:spawn', ['worker:spawn', $workerName, $count], $config);
+            return;
+        case 'queue:push':
+            $queueName = prompt('Queue name', 'default');
+            $payload = prompt('Payload JSON', '{"to":"dev@example.com"}');
+            dispatchCommand('queue:push', ['queue:push', $queueName, $payload], $config);
+            return;
+        case 'supervisor:watch':
+            dispatchCommand('supervisor:watch', ['supervisor:watch'], $config);
+            return;
+        case 'help':
+            renderHelp();
+            return;
+        case 'exit':
+            fwrite(STDOUT, "Bye.\n");
+            return;
+        default:
+            fwrite(STDOUT, "Invalid option.\n");
+            return;
+    }
+}
+
+function selectMenuOption(array $actions): string
+{
+    $selected = 0;
+    $count = count($actions);
+
+    enterRawMode();
+    try {
+        while (true) {
+            renderMenu($actions, $selected);
+            $key = readKey();
+
+            if ($key === "\033[A") {
+                $selected = ($selected - 1 + $count) % $count;
+                continue;
+            }
+
+            if ($key === "\033[B") {
+                $selected = ($selected + 1) % $count;
+                continue;
+            }
+
+            if ($key === "\r" || $key === "\n") {
+                return $actions[$selected]['command'];
+            }
+
+            if (ctype_digit($key)) {
+                $index = (int) $key - 1;
+                if ($index >= 0 && $index < $count) {
+                    return $actions[$index]['command'];
+                }
+            }
+        }
+    } finally {
+        exitRawMode();
+    }
+}
+
+function renderMenu(array $actions, int $selected): void
+{
+    fwrite(STDOUT, "\033[2J\033[H");
+    fwrite(STDOUT, "Swoole Micro CLI\n");
+    fwrite(STDOUT, "Use arrows and Enter (or 1-6).\n\n");
+
+    foreach ($actions as $index => $action) {
+        $prefix = $index === $selected ? '> ' : '  ';
+        $number = $index + 1;
+        fwrite(STDOUT, sprintf("%s%d) %s\n", $prefix, $number, $action['label']));
+    }
+}
+
+function readKey(): string
+{
+    $char = fread(STDIN, 1);
+    if ($char === "\033") {
+        $char .= fread(STDIN, 2);
+    }
+
+    return $char;
+}
+
+function enterRawMode(): void
+{
+    if (stripos(PHP_OS_FAMILY, 'Windows') !== false) {
+        return;
+    }
+
+    @shell_exec('stty -echo -icanon min 1 time 0');
+}
+
+function exitRawMode(): void
+{
+    if (stripos(PHP_OS_FAMILY, 'Windows') !== false) {
+        return;
+    }
+
+    @shell_exec('stty sane');
+}
+
+function listWorkers(array $config): void
+{
+    $workers = $config['workers'] ?? [];
+    if ($workers === []) {
+        fwrite(STDOUT, "No workers configured.\n");
+        return;
+    }
+
+    foreach ($workers as $name => $worker) {
+        $processor = $worker['processor'] ?? 'n/a';
+        $queue = $worker['queue'] ?? $name;
+        fwrite(STDOUT, "{$name} | processor={$processor} | queue={$queue}\n");
+    }
+}
+
+function runWorker(array $args, array $config): void
+{
+    $workerName = $args[1] ?? null;
+    $instanceCount = parseInstanceCount($args);
+    if ($workerName === null || $workerName === '') {
+        fwrite(STDERR, "Usage: worker:run <name> [count|--instances=<count>]\n");
+        exit(1);
+    }
+
+    if ($instanceCount > 1) {
+        spawnWorkers(['worker:spawn', $workerName, (string) $instanceCount]);
+        return;
+    }
+
+    $workerConfig = $config['workers'][$workerName] ?? null;
+    if ($workerConfig === null) {
+        fwrite(STDERR, "Worker {$workerName} not found in config.\n");
+        exit(1);
+    }
+
+    $queueDriver = buildQueueDriver($config['queue'] ?? []);
+    $supervisor = buildSupervisor($config['supervisor'] ?? []);
+    $options = buildWorkerOptions($workerConfig['options'] ?? []);
+
+    $processorClass = $workerConfig['processor'] ?? null;
+    if (!is_string($processorClass) || !class_exists($processorClass)) {
+        fwrite(STDERR, "Processor class not found for worker {$workerName}.\n");
+        exit(1);
+    }
+
+    $processor = new $processorClass();
+
+    $queueName = (string) ($workerConfig['queue'] ?? $workerName);
+
+    $worker = Worker::make($workerName)
+        ->queue($queueDriver, $queueName)
+        ->processor($processor)
+        ->options($options);
+
+    if ($supervisor !== null) {
+        $worker->supervisor($supervisor);
+    }
+
+    $worker->run();
+}
+
+function parseInstanceCount(array $args): int
+{
+    $count = 1;
+
+    if (isset($args[2]) && ctype_digit((string) $args[2])) {
+        $count = (int) $args[2];
+    }
+
+    foreach ($args as $arg) {
+        if (!is_string($arg)) {
+            continue;
+        }
+
+        if (str_starts_with($arg, '--instance=')) {
+            $count = (int) substr($arg, strlen('--instance='));
+            break;
+        }
+
+        if (str_starts_with($arg, '--instances=')) {
+            $count = (int) substr($arg, strlen('--instances='));
+            break;
+        }
+    }
+
+    return max(1, $count);
+}
+
+function spawnWorkers(array $args): void
+{
+    $workerName = $args[1] ?? null;
+    $count = isset($args[2]) ? (int) $args[2] : 1;
+    if ($workerName === null || $workerName === '' || $count < 1) {
+        fwrite(STDERR, "Usage: worker:spawn <name> <count>\n");
+        exit(1);
+    }
+
+    $count = max(1, $count);
+    $script = escapeshellarg(__FILE__);
+    $php = escapeshellarg(PHP_BINARY);
+    $children = [];
+
+    for ($i = 0; $i < $count; $i++) {
+        $command = "{$php} {$script} worker:run " . escapeshellarg($workerName);
+        $descriptorSpec = [
+            0 => ['pipe', 'r'],
+            1 => STDOUT,
+            2 => STDERR,
+        ];
+
+        $process = proc_open($command, $descriptorSpec, $pipes);
+        if (!is_resource($process)) {
+            fwrite(STDERR, "Failed to spawn worker {$workerName}.\n");
+            continue;
+        }
+
+        $status = proc_get_status($process);
+        if (isset($status['pid'])) {
+            fwrite(STDOUT, "Spawned worker {$workerName} (pid {$status['pid']}).\n");
+        }
+
+        $children[] = $process;
+    }
+
+    foreach ($children as $process) {
+        proc_close($process);
+    }
+}
+
+function pushQueue(array $args, array $config): void
+{
+    $queueName = $args[1] ?? null;
+    $payloadJson = $args[2] ?? null;
+    if ($queueName === null || $payloadJson === null) {
+        fwrite(STDERR, "Usage: queue:push <queue> <json>\n");
+        exit(1);
+    }
+
+    $queueDriver = buildQueueDriver($config['queue'] ?? []);
+    if (!$queueDriver instanceof RedisQueueDriver) {
+        fwrite(STDERR, "queue:push requires RedisQueueDriver.\n");
+        exit(1);
+    }
+
+    try {
+        $payload = Json::decode($payloadJson);
+    } catch (Throwable $exception) {
+        fwrite(STDERR, "Invalid JSON payload: {$exception->getMessage()}\n");
+        exit(1);
+    }
+
+    $jobId = $queueDriver->push($queueName, $payload);
+    fwrite(STDOUT, "Enqueued job {$jobId} on {$queueName}.\n");
+}
+
+function watchSupervisor(array $config): void
+{
+    $supervisor = buildSupervisor($config['supervisor'] ?? []);
+    if ($supervisor === null) {
+        fwrite(STDERR, "Supervisor driver not configured.\n");
+        exit(1);
+    }
+
+    $threshold = 15;
+    fwrite(STDOUT, "Watching heartbeats (threshold {$threshold}s).\n");
+
+    while (true) {
+        $dead = $supervisor->deadWorkers($threshold);
+        foreach ($dead as $worker) {
+            fwrite(STDOUT, "DEAD: {$worker}\n");
+        }
+        sleep(2);
+    }
+}
+
+function renderHelp(): void
+{
+    fwrite(STDOUT, "Commands:\n");
+    fwrite(STDOUT, "  interactive                Start interactive CLI\n");
+    fwrite(STDOUT, "  workers:list                List configured workers\n");
+    fwrite(STDOUT, "  worker:run <name> [count]   Run worker(s), optionally spawn multiple\n");
+    fwrite(STDOUT, "  worker:spawn <name> <count> Spawn multiple worker processes\n");
+    fwrite(STDOUT, "  queue:push <queue> <json>   Push a job into Redis queue\n");
+    fwrite(STDOUT, "  supervisor:watch            Watch worker heartbeats\n");
+}
+
+function prompt(string $label, ?string $default = null): string
+{
+    $suffix = $default === null ? '' : " [{$default}]";
+    fwrite(STDOUT, "{$label}{$suffix}: ");
+    $value = trim((string) fgets(STDIN));
+    if ($value === '' && $default !== null) {
+        return $default;
+    }
+
+    return $value;
+}
+
+function buildSupervisor(array $config): ?SupervisorInterface
+{
+    $driverClass = $config['driver'] ?? null;
+    if (!is_string($driverClass)) {
+        return null;
+    }
+
+    if (!class_exists($driverClass)) {
+        throw new RuntimeException('Supervisor driver class not found.');
+    }
+
+    $redisConfig = $config['redis'] ?? [];
+    if (is_a($driverClass, SwooleMicro\Supervisor\RedisSupervisor::class, true)
+        && isset($redisConfig['host'], $redisConfig['port'])) {
+        return new $driverClass(
+            (string) $redisConfig['host'],
+            (int) $redisConfig['port'],
+            (int) ($redisConfig['db'] ?? 0),
+            (string) ($redisConfig['prefix'] ?? 'swoole-micro:'),
+            (string) ($redisConfig['username'] ?? 'default'),
+            (string) ($redisConfig['password'] ?? '')
+        );
+    }
+
+    return new $driverClass();
+}
+
+function buildWorkerOptions(array $options): WorkerOptions
+{
+    $workerOptions = WorkerOptions::new();
+
+    if (isset($options['concurrency'])) {
+        $workerOptions->concurrency((int) $options['concurrency']);
+    }
+
+    if (isset($options['timeoutSeconds'])) {
+        $workerOptions->timeoutSeconds((int) $options['timeoutSeconds']);
+    }
+
+    if (isset($options['memoryLimitMb'])) {
+        $workerOptions->memoryLimitMb((int) $options['memoryLimitMb']);
+    }
+
+    if (isset($options['heartbeatSeconds'])) {
+        $workerOptions->heartbeatSeconds((int) $options['heartbeatSeconds']);
+    }
+
+    return $workerOptions;
+}

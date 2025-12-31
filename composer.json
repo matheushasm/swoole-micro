@@ -1,0 +1,27 @@
+{
+  "name": "vendor/swoole-micro",
+  "description": "Lightweight toolkit to build PHP microservices and workers using Swoole processes + coroutines.",
+  "type": "library",
+  "license": "MIT",
+  "require": {
+    "php": "^8.2",
+    "ext-swoole": "*"
+  },
+  "autoload": {
+    "psr-4": {
+      "SwooleMicro\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Examples\\": "examples/",
+      "Tests\\": "tests/"
+    }
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.5"
+  },
+  "bin": [
+    "bin/swoole-micro"
+  ]
+}
