@@ -136,7 +136,7 @@ Dependencies overview:
 Using Composer (as a package)
 
 ```
-composer require vendor/swoole-micro
+composer require matheushasm/swoole-micro
 ```
 
 Local development (path repository)
@@ -153,7 +153,7 @@ In your app composer.json:
     }
   ],
   "require": {
-    "vendor/swoole-micro": "*"
+    "matheushasm/swoole-micro": "*"
   }
 }
 ```
@@ -161,7 +161,7 @@ In your app composer.json:
 Then:
 
 ```
-composer update vendor/swoole-micro
+composer update matheushasm/swoole-micro
 ```
 
 Platform setup

@@ -1,5 +1,5 @@
 {
-  "name": "vendor/swoole-micro",
+  "name": "matheushasm/swoole-micro",
   "description": "Lightweight toolkit to build PHP microservices and workers using Swoole processes + coroutines.",
   "type": "library",
   "license": "MIT",
