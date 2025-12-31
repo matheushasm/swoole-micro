@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+if [ -x "./vendor/bin/phpunit" ]; then
+  ./vendor/bin/phpunit
+else
+  echo "phpunit not found. Run: composer install" >&2
+  exit 1
+fi

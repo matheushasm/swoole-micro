@@ -679,3 +679,13 @@ Phase 3
 ## License
 
 MIT
+
+## Git Hooks
+
+Run unit tests on every `git push`:
+
+```
+git config core.hooksPath .githooks
+```
+
+This enables `.githooks/pre-push`, which runs `vendor/bin/phpunit`.
